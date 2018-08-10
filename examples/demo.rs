@@ -92,18 +92,32 @@ fn handle_io_port(kvm_run: &kvm_run) {
 fn handle_mmio(kvm_run: &mut kvm_run) {
     let mmio = unsafe { kvm_run.__bindgen_anon_1.mmio };
 
-    if mmio.len == 8 {
-        if mmio.is_write == 0 {
-            let data = &mmio.data as *const _ as *mut u64;
-            unsafe {
-                *data = 0x1000;
-                println!("MMIO read: 0x{:x}", *data);
-            }
-        } else {
-            let value = unsafe { *(&mmio.data as *const _ as *const u64) };
-            println!("MMIO write: 0x{:x}", value);
-        }
-    }
+    let addr = mmio.phys_addr;
+    let len = mmio.len;
+    // let data = mmio.data[0..len as u8];
+    // let data = unsafe {
+    //     std::slice::from_raw_parts(addr as *const u64, len as usize)
+    // };
+    let data = mmio.data.chunks(len as usize);
+
+    println!("MMIO {}, length: {}: [0x{:x}] {:?}",
+             if mmio.is_write == 0 {"read"} else {"write"},
+             len,
+             addr,
+             if mmio.is_write == 1 {format!("{:?}", data)}
+             else {std::string::String::new()});
+    // if mmio.len == 8 {
+    //     if mmio.is_write == 0 {
+    //         let data = &mmio.data as *const _ as *mut u64;
+    //         unsafe {
+    //             // *data = 0x1000;
+    //             println!("MMIO read: [0x{:x}],  ", *data, );
+    //         }
+    //     } else {
+    //         let value = unsafe { *(&mmio.data as *const _ as *const u64) };
+    //         println!("MMIO write: 0x{:x}", value);
+    //     }
+    // }
 }
 
 fn setup_cpuid(kvm: &KVMSystem, vcpu: &VirtualCPU) {
@@ -208,7 +222,8 @@ fn read_payload(mem: &mut MmapMemorySlot) {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("examples");
     p.push("payload");
-    p.push("payload.img");
+    // p.push("payload.img");
+    p.push("coreboot.rom");
 
     let mut f = File::open(&p).expect(&format!(
         "Cannot find \"{}\". Run \"make\" in the same folder to build it",
