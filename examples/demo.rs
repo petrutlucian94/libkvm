@@ -45,7 +45,7 @@ fn main() {
         vm.set_tss_address(0xfffbd000).unwrap();
     }
 
-    let mem_size = 0x100000;
+    let mem_size = 128 << 20;
 
     let mut mem = MmapMemorySlot::new(mem_size, 0);
     vm.set_user_memory_region(&mem).unwrap();
@@ -72,6 +72,9 @@ fn main() {
             KVM_EXIT_IO => {
                 handle_io_port(&kvm_run);
             }
+            KVM_EXIT_SHUTDOWN => {
+                panic!("Guest shutdown.");
+            }
             _ => {
                 panic!("Not supported exit reason: {}", kvm_run.exit_reason);
             }
@@ -82,7 +85,8 @@ fn main() {
 fn handle_io_port(kvm_run: &kvm_run) {
     let io = unsafe { &kvm_run.__bindgen_anon_1.io };
 
-    if io.direction == KVM_EXIT_IO_OUT as u8 && io.port == 42 {
+    println!(">>> IOPort access.");
+    if io.direction == KVM_EXIT_IO_OUT as u8 {
         let data_addr = kvm_run as *const _ as u64 + io.data_offset;
         let data = unsafe { std::slice::from_raw_parts(data_addr as *const u8, io.size as usize) };
         io::stdout().write(data).unwrap();
@@ -149,9 +153,11 @@ fn setup_cpuid(kvm: &KVMSystem, vcpu: &VirtualCPU) {
 
 fn setup_msrs(kvm: &KVMSystem, vcpu: &VirtualCPU) {
     let msr_list = kvm.get_msr_index_list().unwrap();
+    let ignored_msrs = [0x40000020, 0x40000022, 0x40000023];
+    // let ignored_msrs = [];
 
     let msr_entries = msr_list
-        .iter()
+        .iter().filter(|i| !ignored_msrs.contains(i))
         .map(|i| kvm_msr_entry {
             index: *i,
             data: 0,
