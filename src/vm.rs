@@ -93,4 +93,19 @@ impl VirtualMachine {
             return Err(Error::last_os_error());
         }
     }
+
+    pub fn set_identity_map_addr(&self, identity_base: u64) -> Result<(), Error> {
+        let result = unsafe {
+            libc::ioctl(
+                self.ioctl.as_raw_fd(),
+                KVM_SET_IDENTITY_MAP_ADDR,
+                &identity_base as *const u64)
+        };
+        if result == 0 {
+            return Ok(());
+        } else {
+            return Err(Error::last_os_error());
+        }
+    }
+
 }

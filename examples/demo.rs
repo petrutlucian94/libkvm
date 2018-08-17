@@ -39,25 +39,34 @@ fn main() {
     let api = kvm.api_version().unwrap();
     println!("KVM API version: {}", api);
 
+    // let tss_addr = 0xfffbd000;
+    let identity_base = 0xfeffc000;
+    let tss_addr = identity_base + 0x1000;
     let vm = kvm.create_vm().unwrap();
+
+    vm.set_identity_map_addr(identity_base).unwrap();
     if kvm.check_cap_set_tss_address().unwrap() > 0 {
         println!("Setting TSS address");
-        vm.set_tss_address(0xfffbd000).unwrap();
+        vm.set_tss_address(tss_addr as u32).unwrap();
     }
 
     let mem_size = 128 << 20;
+    let fw_size = 2 << 20;
 
-    let mut mem = MmapMemorySlot::new(mem_size, 0);
+    let mut mem = MmapMemorySlot::new(mem_size, 0, 0, 0);
     vm.set_user_memory_region(&mem).unwrap();
+    let mut bios_mem = MmapMemorySlot::new(fw_size, 0xffe00000, 1, 2);
+    vm.set_user_memory_region(&bios_mem).unwrap();
 
-    read_payload(&mut mem);
+    read_payload(&mut bios_mem);
 
     let mut vcpu = vm.create_vcpu().unwrap();
 
-    setup_long_mode(&vcpu, &mem);
+    init_regs(&vcpu);
     setup_cpuid(&kvm, &vcpu);
     setup_msrs(&kvm, &vcpu);
 
+    let mut dump_regs = false;
     loop {
         vcpu.run().unwrap();
         let mut kvm_run = vcpu.kvm_run_mut();
@@ -73,13 +82,42 @@ fn main() {
                 handle_io_port(&kvm_run);
             }
             KVM_EXIT_SHUTDOWN => {
-                panic!("Guest shutdown.");
+                println!("Guest shutdown.");
+            }
+            KVM_EXIT_INTERNAL_ERROR => {
+                dump_regs = true;
+                unsafe {
+                let suberr = kvm_run.__bindgen_anon_1.internal.suberror;
+                let data_len = kvm_run.__bindgen_anon_1.internal.ndata as usize;
+
+                println!("KVM internal error: {}. Extra data: {:#?}",
+                         suberr,
+                         if data_len > 0 {
+                            kvm_run.__bindgen_anon_1.internal.data.chunks(data_len);
+                         }
+                         else {
+                            0;
+                         });
+                }
+                break;
             }
             _ => {
                 panic!("Not supported exit reason: {}", kvm_run.exit_reason);
             }
         }
     }
+
+    if dump_regs {
+        dump_vcpu(&vcpu);
+    }
+}
+
+fn dump_vcpu(vcpu: &VirtualCPU) {
+    let regs = vcpu.get_kvm_regs();
+    let sregs = vcpu.get_kvm_sregs();
+
+    println!("CPU regs: {:#?}", regs);
+    println!("CPU sregs: {:#?}", sregs);
 }
 
 fn handle_io_port(kvm_run: &kvm_run) {
@@ -168,46 +206,66 @@ fn setup_msrs(kvm: &KVMSystem, vcpu: &VirtualCPU) {
     vcpu.set_msrs(&msr_entries).unwrap();
 }
 
-fn setup_long_mode(vcpu: &VirtualCPU, mem: &MmapMemorySlot) {
+// fn get_seg(base: usize, selector: usize, flags: usize,
+//            ) {
+//     unsigned flags = rhs->flags;
+//     lhs->selector = rhs->selector;
+//     lhs->base = rhs->base;
+//     lhs->limit = rhs->limit;
+//     lhs->type = (flags >> DESC_TYPE_SHIFT) & 15;
+//     lhs->present = (flags & DESC_P_MASK) != 0;
+//     lhs->dpl = (flags >> DESC_DPL_SHIFT) & 3;
+//     lhs->db = (flags >> DESC_B_SHIFT) & 1;
+//     lhs->s = (flags & DESC_S_MASK) != 0;
+//     lhs->l = (flags >> DESC_L_SHIFT) & 1;
+//     lhs->g = (flags & DESC_G_MASK) != 0;
+//     lhs->avl = (flags & DESC_AVL_MASK) != 0;
+//     lhs->unusable = !lhs->present;
+//     lhs->padding = 0;
+// }
+
+fn init_regs(vcpu: &VirtualCPU) {
     let mut sregs = vcpu.get_kvm_sregs().unwrap();
-    let mem_addr = mem.host_address();
+    // let mem_addr = mem.host_address();
 
-    let pml4_addr: u64 = 0x2000;
-    let pdpt_addr: u64 = 0x3000;
-    let pd_addr: u64 = 0x4000;
-    let pml4: u64 = mem_addr + pml4_addr;
-    let pdpt: u64 = mem_addr + pdpt_addr;
-    let pd: u64 = mem_addr + pd_addr;
+    // let pml4_addr: u64 = 0x2000;
+    // let pdpt_addr: u64 = 0x3000;
+    // let pd_addr: u64 = 0x4000;
+    // let pml4: u64 = mem_addr + pml4_addr;
+    // let pdpt: u64 = mem_addr + pdpt_addr;
+    // let pd: u64 = mem_addr + pd_addr;
 
-    unsafe {
-        *(pml4 as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | pdpt_addr;
-        *(pdpt as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | pd_addr;
-        *(pd as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | PDE64_PS;
-    }
+    // unsafe {
+    //     *(pml4 as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | pdpt_addr;
+    //     *(pdpt as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | pd_addr;
+    //     *(pd as *mut u64) = PDE64_PRESENT | PDE64_RW | PDE64_USER | PDE64_PS;
+    // }
 
-    sregs.cr3 = pml4_addr;
-    sregs.cr4 = CR4_PAE;
-    sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG;
-    sregs.efer = EFER_LME | EFER_LMA;
+    // sregs.cr3 = pml4_addr;
+    // sregs.cr4 = CR4_PAE;
+    // sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG;
+    // sregs.efer = EFER_LME | EFER_LMA;
 
+    sregs.cr0 = 0x60000010;
     let mut seg = kvm_segment {
-        base: 0,
-        limit: 0xffffffff,
-        selector: 1 << 3,
+        base: 0xffff0000,
+        limit: 0xffff,
+        selector: 0xf000,
         present: 1,
         type_: 11,
         dpl: 0,
         db: 0,
         s: 1,
-        l: 1,
-        g: 1,
+        l: 0,
+        g: 0,
         ..Default::default()
     };
 
     sregs.cs = seg;
 
+    seg.base = 0;
     seg.type_ = 3;
-    seg.selector = 2 << 3;
+    seg.selector = 0;
     sregs.ds = seg;
     sregs.es = seg;
     sregs.fs = seg;
@@ -217,9 +275,13 @@ fn setup_long_mode(vcpu: &VirtualCPU, mem: &MmapMemorySlot) {
     vcpu.set_kvm_sregs(&sregs).unwrap();
 
     let mut regs = vcpu.get_kvm_regs().unwrap();
-    regs.rflags = 2;
-    regs.rip = 0;
-    regs.rsp = mem.memory_size() as u64;
+    // regs.rflags = 2;
+    // regs.rip = 0;
+    // regs.rsp = mem.memory_size() as u64;
+    regs.rdx = 0x663;  // cpuid version
+    regs.rip = 0xfff0;
+    
+    regs.rflags = 0x2;
 
     vcpu.set_kvm_regs(&regs).unwrap();
 }
@@ -230,6 +292,7 @@ fn read_payload(mem: &mut MmapMemorySlot) {
     p.push("payload");
     // p.push("payload.img");
     p.push("coreboot.rom");
+    // p.push("bios.bin");
 
     let mut f = File::open(&p).expect(&format!(
         "Cannot find \"{}\". Run \"make\" in the same folder to build it",
@@ -249,10 +312,13 @@ struct MmapMemorySlot {
     memory_size: usize,
     guest_address: u64,
     host_address: *mut libc::c_void,
+    slot: u32,
+    flags: u32,
 }
 
 impl MmapMemorySlot {
-    pub fn new(memory_size: usize, guest_address: u64) -> MmapMemorySlot {
+    pub fn new(memory_size: usize, guest_address: u64,
+               slot: u32, flags: u32) -> MmapMemorySlot {
         let host_address = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -281,6 +347,8 @@ impl MmapMemorySlot {
             memory_size: memory_size,
             guest_address: guest_address,
             host_address,
+            slot,
+            flags,
         }
     }
 
@@ -291,11 +359,11 @@ impl MmapMemorySlot {
 
 impl MemorySlot for MmapMemorySlot {
     fn slot_id(&self) -> u32 {
-        0
+        self.slot
     }
 
     fn flags(&self) -> u32 {
-        0
+        self.flags
     }
 
     fn memory_size(&self) -> usize {
